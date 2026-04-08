@@ -1,0 +1,17 @@
+{
+  "name": "value-discovery-guide-ai-assisted",
+  "version": "1.6.0",
+  "description": "AI-assisted value discovery guide with persona layers, sourced signals, inferred triggers, and tabbed UI",
+  "main": "server.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2"
+  }
+}
