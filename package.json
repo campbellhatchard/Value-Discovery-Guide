@@ -1,0 +1,17 @@
+{
+  "name": "value-discovery-guide-ai-assisted",
+  "version": "1.4.0",
+  "description": "AI-assisted value discovery guide for BDRs with company intelligence and sourced recent signals",
+  "main": "server.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2"
+  }
+}
