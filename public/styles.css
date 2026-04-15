@@ -24,3 +24,8 @@ a{color:#0b6780;text-decoration:none}a:hover{text-decoration:underline}
 @media(max-width:1100px){.tabs,.company-toolbar,.company-input-row,.pain-grid{grid-template-columns:1fr}.metrics{grid-template-columns:repeat(2,1fr)}.panel-head,.hero{flex-direction:column;align-items:flex-start}}
 @media(max-width:720px){.wrap,.app-shell{padding:0 18px 24px}.metrics,.summary-grid{grid-template-columns:1fr}h1{font-size:28px}h2{font-size:24px}}
 @media print{.topbar,.tabs,.header-actions,.question-actions,.completion-actions,.handoff-actions,.add-custom,.copy-status{display:none!important}body{background:#fff}}
+
+
+.company-input-grid{display:grid;grid-template-columns:minmax(220px,1.2fr) minmax(220px,1.2fr) auto;gap:12px;align-items:center;}
+.company-input-grid input{width:100%;}
+@media (max-width: 900px){.company-input-grid{grid-template-columns:1fr;}}
