@@ -120,6 +120,116 @@ function sortSignalsByMostRecent(items) {
     return db - da;
   });
 }
+function normalizeForDedupe(value = '') {
+  return String(value || '')
+    .toLowerCase()
+    .replace(/https?:\/\/\S+/g, ' ')
+    .replace(/(updated|update|breaking|exclusive|analysis|opinion|press release|news release)/g, ' ')
+    .replace(/[^a-z0-9\s]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+function normalizeHeadlineForDedupe(value = '') {
+  return normalizeForDedupe(String(value || '')
+    .replace(/\s*[|\-–—:]\s*(reuters|bloomberg|yahoo|google news|bing news|pr newswire|prnewswire|globenewswire|access newswire|accesswire).*$/i, ''));
+}
+function confidenceRank(value = '') {
+  const v = String(value || '').toLowerCase();
+  if (v === 'high') return 3;
+  if (v === 'medium') return 2;
+  if (v === 'low') return 1;
+  return 0;
+}
+function sourceQualityRank(item = {}) {
+  const sourceName = normalizeForDedupe(item.source_name || item.feed_name || item.source || '');
+  const sourceUrl = String(item.source_url || item.link || '');
+  const domain = normalizeDomainLike(sourceUrl);
+  const checks = [sourceName, domain].filter(Boolean).join(' ');
+  const patterns = [
+    [/sec\.gov|sec/, 110],
+    [/reuters/, 100],
+    [/bloomberg/, 98],
+    [/wsj|wall street journal|ft\.com|financial times/, 96],
+    [/apnews|associated press/, 94],
+    [/joc|journal of commerce/, 92],
+    [/freightwaves|ttnews|transport topics|supply chain brain|logistics management|scmr|supply chain management review|dcvelocity|industryweek|manufacturing\.net/, 90],
+    [/company|investor|newsroom/, 88],
+    [/prnewswire|globenewswire|accesswire|newswire/, 78],
+    [/google news|bing news/, 40]
+  ];
+  for (const [re, score] of patterns) {
+    if (re.test(checks)) return score;
+  }
+  if (domain) return 70;
+  return 50;
+}
+function signalDuplicateKey(item = {}) {
+  const titleKey = normalizeHeadlineForDedupe(item.signal || item.title || '');
+  const domain = normalizeDomainLike(item.source_url || item.link || '');
+  const yyyymmdd = String(item.date || '').slice(0, 10);
+  return [titleKey, yyyymmdd || '', domain].filter(Boolean).join('|') || titleKey;
+}
+function signalTopicKey(item = {}) {
+  return normalizeHeadlineForDedupe(item.signal || item.title || '');
+}
+function chooseBestSignal(current, candidate) {
+  const score = (x) => [confidenceRank(x.confidence), sourceQualityRank(x), x.date ? new Date(x.date).getTime() : 0];
+  const a = score(current);
+  const b = score(candidate);
+  for (let i = 0; i < a.length; i += 1) {
+    if (b[i] > a[i]) return candidate;
+    if (b[i] < a[i]) return current;
+  }
+  return current;
+}
+function dedupeAndRankSignals(items = []) {
+  const exact = new Map();
+  for (const item of items) {
+    const key = signalDuplicateKey(item);
+    if (!key) continue;
+    exact.set(key, exact.has(key) ? chooseBestSignal(exact.get(key), item) : item);
+  }
+  const byTopic = new Map();
+  for (const item of exact.values()) {
+    const topicKey = signalTopicKey(item);
+    if (!topicKey) continue;
+    byTopic.set(topicKey, byTopic.has(topicKey) ? chooseBestSignal(byTopic.get(topicKey), item) : item);
+  }
+  return sortSignalsByMostRecent([...byTopic.values()]).sort((a, b) => {
+    const conf = confidenceRank(b.confidence) - confidenceRank(a.confidence);
+    if (conf !== 0) return conf;
+    const qual = sourceQualityRank(b) - sourceQualityRank(a);
+    if (qual !== 0) return qual;
+    const db = b.date ? new Date(b.date).getTime() : 0;
+    const da = a.date ? new Date(a.date).getTime() : 0;
+    return db - da;
+  });
+}
+function noteDuplicateKey(note = '') {
+  return normalizeForDedupe(note)
+    .replace(/(the|a|an|this|that|these|those|is|are|was|were|has|have|had|company|business|group|corp|corporation|inc|llc|ltd|limited|pty|plc)/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+function dedupeAndRankEntityNotes(items = []) {
+  const bestByKey = new Map();
+  for (const item of items) {
+    const key = noteDuplicateKey(item.note || '');
+    if (!key) continue;
+    const existing = bestByKey.get(key);
+    const candidateScore = [confidenceRank(item.confidence), sourceQualityRank(item), (item.note || '').length];
+    const existingScore = existing ? [confidenceRank(existing.confidence), sourceQualityRank(existing), (existing.note || '').length] : null;
+    const better = !existingScore || candidateScore[0] > existingScore[0] || (candidateScore[0] === existingScore[0] && (candidateScore[1] > existingScore[1] || (candidateScore[1] === existingScore[1] && candidateScore[2] > existingScore[2])));
+    if (better) bestByKey.set(key, item);
+  }
+  return [...bestByKey.values()].sort((a, b) => {
+    const conf = confidenceRank(b.confidence) - confidenceRank(a.confidence);
+    if (conf !== 0) return conf;
+    const qual = sourceQualityRank(b) - sourceQualityRank(a);
+    if (qual !== 0) return qual;
+    return (b.note || '').length - (a.note || '').length;
+  });
+}
 function cutoffDateYearsAgo(years) {
   const d = new Date();
   d.setFullYear(d.getFullYear() - years);
@@ -458,13 +568,7 @@ async function fetchCompanyEntityIntelligence(companyInput = '') {
   entityNotes.push(...extractStructuredEntityNotes(home.text, home.url, 'website'));
   for (const p of relatedPages) entityNotes.push(...extractStructuredEntityNotes(p.text, p.url, 'website'));
 
-  const seen = new Set();
-  const dedupedNotes = entityNotes.filter(n => {
-    const key = `${n.note}|${n.source_url}`;
-    if (seen.has(key)) return false;
-    seen.add(key);
-    return true;
-  }).slice(0, 10);
+  const dedupedNotes = dedupeAndRankEntityNotes(entityNotes).slice(0, 10);
 
   return {
     official_domain: domainInfo.official_domain,
@@ -504,7 +608,7 @@ async function fetchAllSignals(searchEntityInput) {
       return !isNaN(t) && t >= cutoff;
     });
 
-  return sortSignalsByMostRecent(uniqByLink(combined)).slice(0, MAX_SIGNAL_RESULTS);
+  return dedupeAndRankSignals(uniqByLink(combined)).slice(0, MAX_SIGNAL_RESULTS);
 }
 
 app.get('/healthz', (req, res) => res.json({ ok: true }));

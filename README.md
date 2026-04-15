@@ -23,3 +23,8 @@ Render:
 
 - Direct publisher RSS and Atom feeds often expose only their currently available feed items, not complete 5-year archives. This package supplements those feeds with company/domain search-driven feeds to improve 5-year signal coverage.
 - The recent signals area shows matched items only and sorts them from newest to oldest.
+
+
+## Version 2.3.0
+- Added server-side de-duplication for Supporting Entity Notes and Recent Signals.
+- When duplicate or syndicated signals are found across multiple sources, the app now keeps a single best record based on confidence first, then source quality, then recency.
