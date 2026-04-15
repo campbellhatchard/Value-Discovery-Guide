@@ -1,6 +1,6 @@
 {
   "name": "value-discovery-guide-ai-assisted",
-  "version": "2.2.0",
+  "version": "2.2.1",
   "description": "AI-assisted value discovery guide with structured entity evidence",
   "main": "server.js",
   "type": "commonjs",

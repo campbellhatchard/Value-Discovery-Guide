@@ -187,6 +187,28 @@ function isRelevantToCompany(item, companyOrUrl) {
     ? buildSearchEntity('', companyOrUrl)
     : buildSearchEntity(companyOrUrl, ''));
 }
+
+function operationalKeywordMatches(item) {
+  const keywords = [
+    "inventory","warehouse","supply chain","logistics","erp","system upgrade","digital transformation",
+    "automation","distribution","manufacturing","operations","facility","expansion","technology",
+    "integration","oracle","sap","fusion","capital expenditure","capex","maintenance","service expansion",
+    "network","modernization","migration","implementation","rollout","fulfillment","distribution center",
+    "wms","procurement","material handling","plant","factory","fleet","divestiture","acquisition","merger",
+    "funding","private equity","investment"
+  ];
+  const text = normalizedText(item.title, item.description);
+  return keywords.filter(k => text.includes(normalizedText(k)));
+}
+function categorizeSignal(item) {
+  const text = normalizedText(item.title, item.description);
+  if (/(acquisition|acquire|merger|divestiture|private equity|investment|funding|deal|capital raise)/.test(text)) return 'M&A / Funding';
+  if (/(oracle|sap|erp|fusion|system upgrade|digital transformation|modernization|migration|implementation|rollout|integration)/.test(text)) return 'ERP / Technology';
+  if (/(warehouse|inventory|fulfillment|distribution center|wms|material handling)/.test(text)) return 'Warehouse / Inventory';
+  if (/(manufacturing|plant|factory|production|industrial|distribution)/.test(text)) return 'Manufacturing / Distribution';
+  if (/(logistics|supply chain|operations|fleet|maintenance|service expansion|facility|expansion)/.test(text)) return 'Operations / Logistics';
+  return 'General';
+}
 function confidenceForEntitySignal(item, entity = {}) {
   const text = normalizedText(item.title, item.description, item.link, item.source);
   const companyMatch = entity.company_normalized ? containsExactCompanyPhrase(text, entity.company_normalized) : false;
