@@ -1,6 +1,7 @@
 require('dotenv').config();
 const express = require('express');
 const path = require('path');
+const { staticFeeds } = require('./feedCatalog');
 
 const app = express();
 const PORT = process.env.PORT || 10000;
@@ -23,31 +24,9 @@ const PAIN_POINTS = [
   "System / integration gaps"
 ];
 
-const RSS_FEEDS = [
-  "https://www.supplychaindive.com/feeds/news",
-  "https://www.supplychain247.com/rss",
-  "https://www.supplychainbrain.com/rss/articles",
-  "https://feeds.feedburner.com/logisticsmgmt/latest",
-  "https://logisticsviewpoints.com/feed",
-  "https://warehousenews.co.uk/feed",
-  "https://www.mmh.com/rss",
-  "https://www.dcvelocity.com/rss",
-  "https://www.extensiv.com/blog/rss.xml",
-  "https://www.tecsys.com/blog/rss.xml",
-  "https://www.manufacturingdive.com/feeds/news",
-  "https://www.industryweek.com/rss",
-  "https://www.mdm.com/feed",
-  "https://www.inddist.com/feed",
-  "https://www.manufacturingtomorrow.com/rss_feed.php",
-  "https://news.crunchbase.com/feed",
-  "https://www.nytimes.com/svc/collections/v1/publish/www.nytimes.com/topic/subject/mergers-acquisitions-and-divestitures/rss.xml",
-  "https://www.theguardian.com/business/mergers-and-acquisitions/rss",
-  "https://www.pehub.com/feed",
-  "https://peprofessional.com/feed",
-  "https://www.venturecapitaljournal.com/feed",
-  "https://www.deallawyers.com/blog/feed",
-  "https://www.clearymawatch.com/feed"
-];
+const MAX_SIGNAL_RESULTS = 24;
+const FEED_FETCH_TIMEOUT_MS = 7000;
+const FEED_LOOKBACK_YEARS = 5;
 
 function extractOutputText(resp) {
   if (resp.output_text) return resp.output_text;
@@ -95,20 +74,31 @@ function decodeHtmlBasic(str = '') {
     .replace(/<[^>]+>/g, ' ')
   ).replace(/\s+/g, ' ').trim();
 }
-function parseRssItems(xml = '') {
+function parseFeedItems(xml = '') {
   const items = [];
-  const itemMatches = xml.match(/<item>[\s\S]*?<\/item>/g) || [];
-  for (const itemXml of itemMatches) {
-    const title = decodeEntities(stripCdata((itemXml.match(/<title>([\s\S]*?)<\/title>/i) || [, ''])[1]));
-    const link = decodeEntities(stripCdata((itemXml.match(/<link>([\s\S]*?)<\/link>/i) || [, ''])[1]));
-    const pubDate = decodeEntities(stripCdata((itemXml.match(/<pubDate>([\s\S]*?)<\/pubDate>/i) || [, ''])[1]));
-    const description = decodeEntities(stripCdata((itemXml.match(/<description>([\s\S]*?)<\/description>/i) || [, ''])[1]));
+  const rssItems = xml.match(/<item[\s>][\s\S]*?<\/item>/gi) || [];
+  for (const itemXml of rssItems) {
+    const title = decodeEntities(stripCdata((itemXml.match(/<title[^>]*>([\s\S]*?)<\/title>/i) || [, ''])[1]));
+    const link = decodeEntities(stripCdata((itemXml.match(/<link[^>]*>([\s\S]*?)<\/link>/i) || [, ''])[1]));
+    const pubDate = decodeEntities(stripCdata((itemXml.match(/<(?:pubDate|published|updated)[^>]*>([\s\S]*?)<\/(?:pubDate|published|updated)>/i) || [, ''])[1]));
+    const description = decodeEntities(stripCdata((itemXml.match(/<(?:description|summary|content:encoded)[^>]*>([\s\S]*?)<\/(?:description|summary|content:encoded)>/i) || [, ''])[1]));
     const source = decodeEntities(stripCdata((itemXml.match(/<source[^>]*>([\s\S]*?)<\/source>/i) || [, ''])[1]));
     if (title && link) items.push({ title, link, pubDate, description, source });
   }
+
+  const atomEntries = xml.match(/<entry[\s>][\s\S]*?<\/entry>/gi) || [];
+  for (const entryXml of atomEntries) {
+    const title = decodeEntities(stripCdata((entryXml.match(/<title[^>]*>([\s\S]*?)<\/title>/i) || [, ''])[1]));
+    const link = decodeEntities(stripCdata((entryXml.match(/<link[^>]+href=["']([^"']+)["'][^>]*\/?>(?:<\/link>)?/i) || [, ''])[1]));
+    const pubDate = decodeEntities(stripCdata((entryXml.match(/<(?:published|updated)[^>]*>([\s\S]*?)<\/(?:published|updated)>/i) || [, ''])[1]));
+    const description = decodeEntities(stripCdata((entryXml.match(/<(?:summary|content)[^>]*>([\s\S]*?)<\/(?:summary|content)>/i) || [, ''])[1]));
+    if (title && link) items.push({ title, link, pubDate, description, source: '' });
+  }
+
   return items;
 }
 function uniqByLink(items) {
+
   const seen = new Set();
   return items.filter(item => {
     const key = item.source_url || item.link || '';
@@ -130,9 +120,9 @@ function sortSignalsByMostRecent(items) {
     return db - da;
   });
 }
-function cutoffDateMonthsAgo(months) {
+function cutoffDateYearsAgo(years) {
   const d = new Date();
-  d.setMonth(d.getMonth() - months);
+  d.setFullYear(d.getFullYear() - years);
   return d.getTime();
 }
 function normalizedText(...parts) {
@@ -152,6 +142,28 @@ function extractSearchTarget(companyOrUrl = '') {
   if (isUrl) return { mode: 'domain', raw, exact: normalizeDomainLike(raw) };
   return { mode: 'company', raw, exact: normalizedText(raw) };
 }
+function buildSearchEntity(companyName = '', websiteUrl = '') {
+  const company = String(companyName || '').trim();
+  const website = String(websiteUrl || '').trim();
+  const domain = normalizeDomainLike(website);
+  return {
+    company_name: company,
+    website_url: website,
+    domain,
+    company_normalized: normalizedText(company),
+    labels: uniqueStrings([company, domain, website])
+  };
+}
+function hasCompanyOrDomain(entity = {}) {
+  return !!(entity.company_name || entity.domain || entity.website_url);
+}
+function entityDisplayLabel(entity = {}) {
+  return entity.company_name || entity.domain || entity.website_url || '';
+}
+function isLikelyUrl(value = '') {
+  const raw = String(value || '').trim();
+  return /^https?:\/\//i.test(raw) || /\.[a-z]{2,}(\/|$)/i.test(raw);
+}
 function containsExactCompanyPhrase(text, exactPhrase) {
   if (!exactPhrase) return false;
   const escaped = exactPhrase.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -164,45 +176,46 @@ function containsExactDomain(text, domain) {
   const regex = new RegExp(`(^|\\s|https?://|www\\.)${escaped}(\\s|/|$)`, 'i');
   return regex.test(text);
 }
+function isRelevantToEntity(item, entity = {}) {
+  const text = normalizedText(item.title, item.description, item.link, item.source);
+  const companyMatch = entity.company_normalized ? containsExactCompanyPhrase(text, entity.company_normalized) : false;
+  const domainMatch = entity.domain ? containsExactDomain(text, entity.domain) : false;
+  return companyMatch || domainMatch;
+}
 function isRelevantToCompany(item, companyOrUrl) {
-  const target = extractSearchTarget(companyOrUrl);
+  return isRelevantToEntity(item, isLikelyUrl(companyOrUrl)
+    ? buildSearchEntity('', companyOrUrl)
+    : buildSearchEntity(companyOrUrl, ''));
+}
+function confidenceForEntitySignal(item, entity = {}) {
   const text = normalizedText(item.title, item.description, item.link, item.source);
-  return target.mode === 'domain'
-    ? containsExactDomain(text, target.exact)
-    : containsExactCompanyPhrase(text, target.exact);
-}
-function operationalKeywordMatches(item) {
-  const keywords = [
-    "inventory","warehouse","supply chain","logistics","erp","system upgrade","digital transformation",
-    "automation","distribution","manufacturing","operations","facility","expansion","technology",
-    "integration","oracle","sap","fusion","capital expenditure","capex","maintenance","service expansion",
-    "network","modernization","migration","implementation","rollout","fulfillment","distribution center",
-    "wms","procurement","material handling","plant","factory","fleet","divestiture","acquisition","merger",
-    "funding","private equity","investment"
-  ];
-  const text = normalizedText(item.title, item.description);
-  return keywords.filter(k => text.includes(normalizedText(k)));
-}
-function categorizeSignal(item) {
-  const text = normalizedText(item.title, item.description);
-  if (/(acquisition|acquire|merger|divestiture|private equity|investment|funding|deal|capital raise)/.test(text)) return 'M&A / Funding';
-  if (/(oracle|sap|erp|fusion|system upgrade|digital transformation|modernization|migration|implementation|rollout|integration)/.test(text)) return 'ERP / Technology';
-  if (/(warehouse|inventory|fulfillment|distribution center|wms|material handling)/.test(text)) return 'Warehouse / Inventory';
-  if (/(manufacturing|plant|factory|production|industrial|distribution)/.test(text)) return 'Manufacturing / Distribution';
-  if (/(logistics|supply chain|operations|fleet|maintenance|service expansion|facility|expansion)/.test(text)) return 'Operations / Logistics';
-  return 'General';
-}
-function confidenceForSignal(item, companyOrUrl) {
-  const target = extractSearchTarget(companyOrUrl);
-  const text = normalizedText(item.title, item.description, item.link, item.source);
-  const exactMatch = target.mode === 'domain'
-    ? containsExactDomain(text, target.exact)
-    : containsExactCompanyPhrase(text, target.exact);
+  const companyMatch = entity.company_normalized ? containsExactCompanyPhrase(text, entity.company_normalized) : false;
+  const domainMatch = entity.domain ? containsExactDomain(text, entity.domain) : false;
   const opMatches = operationalKeywordMatches(item).length;
-  if (exactMatch && opMatches >= 2) return 'High';
-  if (exactMatch && opMatches >= 1) return 'Medium';
+  if ((companyMatch || domainMatch) && opMatches >= 2) return 'High';
+  if ((companyMatch || domainMatch) && opMatches >= 1) return 'Medium';
+  if (companyMatch || domainMatch) return 'Low';
   return 'Low';
 }
+function confidenceForSignal(item, companyOrUrl) {
+  return confidenceForEntitySignal(item, isLikelyUrl(companyOrUrl)
+    ? buildSearchEntity('', companyOrUrl)
+    : buildSearchEntity(companyOrUrl, ''));
+}
+function signalKeywordsForEntity(entity = {}) {
+  const companyQ = entity.company_name ? `\"${entity.company_name}\"` : '';
+  const domainQ = entity.domain ? `\"${entity.domain}\"` : '';
+  return uniqueStrings([companyQ, domainQ]).filter(Boolean);
+}
+function encodeGoogleNewsQuery(query = '') {
+  return encodeURIComponent(String(query || '').trim()).replace(/%20/g, '+');
+}
+function fiveYearAfterDate() {
+  const d = new Date();
+  d.setFullYear(d.getFullYear() - FEED_LOOKBACK_YEARS);
+  return d.toISOString().slice(0, 10);
+}
+
 function firstGroup(re, text) {
   const m = String(text || '').match(re);
   return m ? m[1] : '';
@@ -301,6 +314,65 @@ function extractStructuredEntityNotes(text = '', sourceUrl = '', evidenceType = 
     return true;
   }).slice(0, 8);
 }
+async function fetchWithTimeout(url, options = {}, timeoutMs = FEED_FETCH_TIMEOUT_MS) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...options, signal: controller.signal });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+async function mapWithConcurrency(items = [], limit = 8, handler = async () => null) {
+  const results = [];
+  let index = 0;
+  const workers = Array.from({ length: Math.min(limit, items.length || 0) }, async () => {
+    while (index < items.length) {
+      const current = index++;
+      try {
+        results[current] = await handler(items[current], current);
+      } catch {
+        results[current] = null;
+      }
+    }
+  });
+  await Promise.all(workers);
+  return results.filter(Boolean);
+}
+function buildEntityDrivenFeeds(entity = {}) {
+  const afterDate = fiveYearAfterDate();
+  const companyTerm = entity.company_name ? `\"${entity.company_name}\"` : '';
+  const domainTerm = entity.domain ? `\"${entity.domain}\"` : '';
+  const baseTerms = [companyTerm, domainTerm].filter(Boolean).join(' OR ');
+  if (!baseTerms) return [];
+  const queries = [
+    `${baseTerms} after:${afterDate}`,
+    `${baseTerms} (inventory OR warehouse OR logistics OR supply chain OR manufacturing OR distribution) after:${afterDate}`,
+    `${baseTerms} (ERP OR WMS OR TMS OR automation OR implementation OR upgrade OR migration) after:${afterDate}`,
+    `${baseTerms} (funding OR acquisition OR merger OR expansion OR facility OR plant OR distribution center) after:${afterDate}`
+  ];
+  const googleFeeds = queries.map((query, i) => ({
+    name: `Google News Company Search ${i + 1}`,
+    url: `https://news.google.com/rss/search?q=${encodeGoogleNewsQuery(query)}&hl=en-US&gl=US&ceid=US:en`,
+    category: 'Google News Company Search'
+  }));
+  const bingFeeds = queries.map((query, i) => ({
+    name: `Bing News Company Search ${i + 1}`,
+    url: `https://www.bing.com/news/search?q=${encodeURIComponent(query)}&format=rss`,
+    category: 'Bing News Company Search'
+  }));
+  return [...googleFeeds, ...bingFeeds];
+}
+async function fetchFeedEntries(feed = {}) {
+  try {
+    const res = await fetchWithTimeout(feed.url, { headers: { 'User-Agent': 'Mozilla/5.0' } });
+    if (!res.ok) return [];
+    const xml = await res.text();
+    return parseFeedItems(xml).map(item => ({ ...item, feed_name: feed.name, feed_category: feed.category }));
+  } catch {
+    return [];
+  }
+}
 async function resolveOfficialDomain(companyInput = '') {
   const target = extractSearchTarget(companyInput);
   if (target.mode === 'domain') return { official_domain: target.exact, official_url: `https://${target.exact}` };
@@ -308,7 +380,7 @@ async function resolveOfficialDomain(companyInput = '') {
   for (const q of queries) {
     try {
       const url = `https://www.bing.com/search?q=${encodeURIComponent(q)}&setlang=en-US`;
-      const res = await fetch(url, { headers: { 'User-Agent': 'Mozilla/5.0' } });
+      const res = await fetchWithTimeout(url, { headers: { 'User-Agent': 'Mozilla/5.0' } });
       if (!res.ok) continue;
       const html = await res.text();
       const candidates = [...html.matchAll(/<a[^>]+href="(https?:\/\/[^"]+)"/gi)].map(m => m[1]);
@@ -324,7 +396,7 @@ async function resolveOfficialDomain(companyInput = '') {
 }
 async function fetchPage(url = '') {
   try {
-    const res = await fetch(url, { headers: { 'User-Agent': 'Mozilla/5.0' } });
+    const res = await fetchWithTimeout(url, { headers: { 'User-Agent': 'Mozilla/5.0' } });
     if (!res.ok) return { url, html: '', text: '' };
     const html = await res.text();
     return { url, html, text: decodeHtmlBasic(html) };
@@ -381,61 +453,36 @@ async function fetchCompanyEntityIntelligence(companyInput = '') {
     entity_notes: dedupedNotes
   };
 }
-async function fetchBingNewsSignals(companyInput) {
-  const target = extractSearchTarget(companyInput);
-  const exactQuery = target.mode === 'domain' ? `"${target.exact}"` : `"${target.raw}"`;
-  const queries = [
-    `${exactQuery} inventory OR warehouse OR supply chain`,
-    `${exactQuery} ERP OR "system upgrade" OR "digital transformation" OR Oracle OR SAP OR Fusion`,
-    `${exactQuery} "capital expenditure" OR IT OR technology OR modernization OR transformation`,
-    `${exactQuery} operations OR logistics OR manufacturing OR distribution`,
-    `${exactQuery} maintenance OR service expansion OR facility OR expansion`,
-    `${exactQuery} press release OR investor OR earnings OR results OR partnership`
-  ];
-  const all = [];
-  for (const q of queries) {
-    try {
-      const url = `https://www.bing.com/news/search?q=${encodeURIComponent(q)}&format=rss`;
-      const res = await fetch(url, { headers: { 'User-Agent': 'Mozilla/5.0' } });
-      if (!res.ok) continue;
-      const xml = await res.text();
-      all.push(...parseRssItems(xml).map(item => ({ ...item, feed_name: 'Bing News' })));
-    } catch {}
-  }
-  return all.filter(item => isRelevantToCompany(item, companyInput));
-}
-async function fetchIndustrySignals(companyInput) {
-  const results = [];
-  for (const feed of RSS_FEEDS) {
-    try {
-      const res = await fetch(feed, { headers: { 'User-Agent': 'Mozilla/5.0' } });
-      if (!res.ok) continue;
-      const xml = await res.text();
-      const items = parseRssItems(xml);
-      for (const item of items) {
-        if (isRelevantToCompany(item, companyInput) && operationalKeywordMatches(item).length) results.push({ ...item, feed_name: feed });
-      }
-    } catch {}
-  }
-  return results;
-}
-async function fetchAllSignals(companyInput) {
-  const cutoff = cutoffDateMonthsAgo(36);
-  const [bingSignals, industrySignals] = await Promise.all([fetchBingNewsSignals(companyInput), fetchIndustrySignals(companyInput)]);
-  const combined = [...bingSignals, ...industrySignals].map(item => ({
-    signal: item.title,
-    date: formatDate(item.pubDate),
-    source_name: item.source || item.feed_name || 'Source',
-    source_url: item.link,
-    category: categorizeSignal(item),
-    confidence: confidenceForSignal(item, companyInput),
-    description: item.description || ''
-  })).filter(item => {
-    if (!item.date) return true;
-    const t = new Date(item.date).getTime();
-    return !isNaN(t) && t >= cutoff;
-  });
-  return sortSignalsByMostRecent(uniqByLink(combined)).slice(0, 18);
+async function fetchAllSignals(searchEntityInput) {
+  const entity = typeof searchEntityInput === 'string'
+    ? (isLikelyUrl(searchEntityInput) ? buildSearchEntity('', searchEntityInput) : buildSearchEntity(searchEntityInput, ''))
+    : buildSearchEntity(searchEntityInput?.company_name || '', searchEntityInput?.website_url || '');
+
+  if (!hasCompanyOrDomain(entity)) return [];
+
+  const cutoff = cutoffDateYearsAgo(FEED_LOOKBACK_YEARS);
+  const feeds = [...staticFeeds, ...buildEntityDrivenFeeds(entity)];
+  const feedResults = await mapWithConcurrency(feeds, 8, async (feed) => fetchFeedEntries(feed));
+  const flattened = feedResults.flat();
+
+  const combined = flattened
+    .filter(item => isRelevantToEntity(item, entity))
+    .map(item => ({
+      signal: item.title,
+      date: formatDate(item.pubDate),
+      source_name: item.source || item.feed_name || 'Source',
+      source_url: item.link,
+      category: item.feed_category || categorizeSignal(item),
+      confidence: confidenceForEntitySignal(item, entity),
+      description: item.description || ''
+    }))
+    .filter(item => {
+      if (!item.date) return true;
+      const t = new Date(item.date).getTime();
+      return !isNaN(t) && t >= cutoff;
+    });
+
+  return sortSignalsByMostRecent(uniqByLink(combined)).slice(0, MAX_SIGNAL_RESULTS);
 }
 
 app.get('/healthz', (req, res) => res.json({ ok: true }));
@@ -444,8 +491,12 @@ app.get('/api/config', (req, res) => res.json({ pain_points: PAIN_POINTS, modelC
 app.post('/api/company-insight', async (req, res) => {
   try {
     if (!OPENAI_API_KEY) return res.status(400).json({ ok: false, error: 'OPENAI_API_KEY not configured' });
-    const { company_input, persona_level } = req.body || {};
-    const [newsItems, entityIntel] = await Promise.all([fetchAllSignals(company_input || ''), fetchCompanyEntityIntelligence(company_input || '')]);
+    const { company_input, company_name, website_url, persona_level } = req.body || {};
+    const effectiveCompanyName = String(company_name || '').trim() || (isLikelyUrl(company_input || '') ? '' : String(company_input || '').trim());
+    const effectiveWebsiteUrl = String(website_url || '').trim() || (isLikelyUrl(company_input || '') ? String(company_input || '').trim() : '');
+    const searchEntity = buildSearchEntity(effectiveCompanyName, effectiveWebsiteUrl);
+    const lookupSeed = effectiveWebsiteUrl || effectiveCompanyName || company_input || '';
+    const [newsItems, entityIntel] = await Promise.all([fetchAllSignals(searchEntity), fetchCompanyEntityIntelligence(lookupSeed)]);
 
     const instructions = `
 You are a value engineering intelligence assistant helping a BDR or sales rep prepare for a discovery conversation.
@@ -519,9 +570,11 @@ Rules:
         role: "user",
         content: [{
           type: "input_text",
-          text: `Company input: ${company_input || ''}
+          text: `Company name: ${effectiveCompanyName || ''}
+Website URL: ${effectiveWebsiteUrl || ''}
+Combined lookup seed: ${lookupSeed || ''}
 
-Sourced recent news items from last 36 months:
+Sourced recent news items from the configured feed catalog and search feeds over the last ${FEED_LOOKBACK_YEARS} years:
 ${JSON.stringify(newsItems, null, 2)}
 
 Resolved domain and entity evidence:
