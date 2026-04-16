@@ -24,7 +24,7 @@ const PAIN_POINTS = [
   'System / integration gaps'
 ];
 
-const APP_VERSION = '3.0.5';
+const APP_VERSION = '3.0.6';
 const MAX_SIGNAL_RESULTS = 20;
 const FEED_FETCH_TIMEOUT_MS = 6000;
 const FEED_LOOKBACK_YEARS = 5;
@@ -36,7 +36,8 @@ const MAX_HTML_BYTES = 1500000;
 const MAX_PDF_BYTES = 4000000;
 const DEEP_DIVE_TIMEOUT_MS = 25000;
 const ENTITY_INTEL_TIMEOUT_MS = 12000;
-const OPENAI_TIMEOUT_MS = 25000;
+const OPENAI_TIMEOUT_MS = 60000;
+const OPENAI_RETRY_TIMEOUT_MS = 45000;
 
 function extractOutputText(resp) {
   if (resp.output_text) return resp.output_text;
@@ -54,6 +55,73 @@ function parseJsonFromText(text) {
   if (!match) throw new Error('No JSON object found in model response');
   return JSON.parse(match[0]);
 }
+
+function isAbortError(err) {
+  return !!err && (err.name === 'AbortError' || String(err.message || '').toLowerCase().includes('aborted'));
+}
+async function callOpenAIResponses(payload, timeoutMs = OPENAI_TIMEOUT_MS) {
+  const response = await fetchWithTimeout('https://api.openai.com/v1/responses', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${OPENAI_API_KEY}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload)
+  }, timeoutMs);
+  const raw = await response.text();
+  if (!response.ok) {
+    const err = new Error('OpenAI request failed');
+    err.detail = raw.slice(0, 500);
+    err.statusCode = 500;
+    throw err;
+  }
+  let parsedBody;
+  try {
+    parsedBody = JSON.parse(raw);
+  } catch {
+    const err = new Error('Non-JSON response from model provider');
+    err.detail = raw.slice(0, 500);
+    err.statusCode = 502;
+    throw err;
+  }
+  return parsedBody;
+}
+function buildModelPayload({ instructions, effectiveCompanyName, effectiveWebsiteUrl, lookupSeed, mergedSignals, entityIntel, deepDive, compact = false }) {
+  const signalChars = compact ? 5000 : 12000;
+  const entityChars = compact ? 3500 : 6000;
+  const diveChars = compact ? 8000 : 18000;
+  const compactDive = {
+    analysis_options: deepDive.analysis_options,
+    website_intelligence_summary: deepDive.website_intelligence_summary,
+    corporate_reports: (deepDive.corporate_reports || []).slice(0, compact ? 5 : 12),
+    operational_footprint: deepDive.operational_footprint,
+    linked_entities_review: (deepDive.linked_entities_review || []).slice(0, compact ? 2 : 4),
+    evidence_graph_stats: deepDive.evidence_graph_stats
+  };
+  return {
+    model: OPENAI_MODEL,
+    instructions,
+    input: [{
+      role: 'user',
+      content: [{
+        type: 'input_text',
+        text: `Company name: ${effectiveCompanyName || ''}
+Website URL: ${effectiveWebsiteUrl || ''}
+Combined lookup seed: ${lookupSeed || ''}
+
+Sourced recent signals over the last ${FEED_LOOKBACK_YEARS} years:
+${truncateForModel(JSON.stringify(mergedSignals, null, 2), signalChars)}
+
+Resolved domain and entity evidence:
+${truncateForModel(JSON.stringify(entityIntel, null, 2), entityChars)}
+
+Website deep-dive evidence:
+${truncateForModel(JSON.stringify(compactDive, null, 2), diveChars)}`
+      }]
+    }],
+    temperature: 0.2,
+    max_output_tokens: compact ? 1800 : 2600,
+    store: false
+  };
+}
+
 function fallbackResult(reason) {
   return {
     stage: 'impact',
@@ -1100,53 +1168,24 @@ Rules:
 - Use the website deep-dive evidence to strengthen your discovery angles, hypotheses, and why-now notes.
 `;
 
-    const payload = {
-      model: OPENAI_MODEL,
-      instructions,
-      input: [{
-        role: 'user',
-        content: [{
-          type: 'input_text',
-          text: `Company name: ${effectiveCompanyName || ''}
-Website URL: ${effectiveWebsiteUrl || ''}
-Combined lookup seed: ${lookupSeed || ''}
-
-Sourced recent signals over the last ${FEED_LOOKBACK_YEARS} years:
-${truncateForModel(JSON.stringify(mergedSignals, null, 2), 12000)}
-
-Resolved domain and entity evidence:
-${truncateForModel(JSON.stringify(entityIntel, null, 2), 6000)}
-
-Website deep-dive evidence:
-${truncateForModel(JSON.stringify({
-  analysis_options: deepDive.analysis_options,
-  website_intelligence_summary: deepDive.website_intelligence_summary,
-  corporate_reports: deepDive.corporate_reports,
-  operational_footprint: deepDive.operational_footprint,
-  linked_entities_review: deepDive.linked_entities_review,
-  evidence_graph_stats: deepDive.evidence_graph_stats
-}, null, 2), 18000)}`
-        }]
-      }],
-      temperature: 0.2,
-      max_output_tokens: 2600,
-      store: false
-    };
-
-    const response = await fetchWithTimeout('https://api.openai.com/v1/responses', {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${OPENAI_API_KEY}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload)
-    }, OPENAI_TIMEOUT_MS);
-
-    const raw = await response.text();
-    if (!response.ok) return safeJsonError(res, 500, 'OpenAI request failed', { detail: raw.slice(0, 500) });
+    const payload = buildModelPayload({ instructions, effectiveCompanyName, effectiveWebsiteUrl, lookupSeed, mergedSignals, entityIntel, deepDive, compact: false });
 
     let parsedBody;
     try {
-      parsedBody = JSON.parse(raw);
-    } catch {
-      return safeJsonError(res, 502, 'Non-JSON response from model provider', { detail: raw.slice(0, 500) });
+      parsedBody = await callOpenAIResponses(payload, OPENAI_TIMEOUT_MS);
+    } catch (err) {
+      if (!isAbortError(err)) {
+        if (err.detail) return safeJsonError(res, err.statusCode || 500, err.message, { detail: err.detail });
+        throw err;
+      }
+      const compactPayload = buildModelPayload({ instructions, effectiveCompanyName, effectiveWebsiteUrl, lookupSeed, mergedSignals, entityIntel, deepDive, compact: true });
+      try {
+        parsedBody = await callOpenAIResponses(compactPayload, OPENAI_RETRY_TIMEOUT_MS);
+      } catch (retryErr) {
+        if (retryErr.detail) return safeJsonError(res, retryErr.statusCode || 500, retryErr.message, { detail: retryErr.detail, retried_compact_payload: true });
+        if (isAbortError(retryErr)) return safeJsonError(res, 504, 'The company analysis timed out while preparing the AI summary. Try unchecking some deep-dive options or rerun the search.', { retried_compact_payload: true });
+        throw retryErr;
+      }
     }
     const parsed = parseJsonFromText(extractOutputText(parsedBody));
     parsed.recent_signals = mergedSignals;

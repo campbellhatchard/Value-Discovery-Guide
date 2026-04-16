@@ -66,3 +66,9 @@ Release 3.0.4 fixes a frontend runtime error where deep-dive analysis options we
 Current package version: 3.0.5
 
 This release adds stricter crawl and PDF limits, timeout guards, and better JSON error reporting for large websites such as Ceva.
+
+
+Release: 3.0.6
+- Increased OpenAI response timeout
+- Added compact retry path if the first AI summary attempt aborts
+- Returns clearer JSON timeout errors instead of raw abort messages
