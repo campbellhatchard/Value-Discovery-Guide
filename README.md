@@ -56,3 +56,6 @@ npm start
 
 
 Deployment note: node_modules is intentionally excluded from this package and should not be committed to Git. Render will install dependencies from package.json and package-lock.json during deploy.
+
+
+Release 3.0.4 fixes a frontend runtime error where deep-dive analysis options were referenced before the helper function was defined.
