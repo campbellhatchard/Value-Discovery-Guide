@@ -1,3 +1,7 @@
+Release 3.0.3
+
+Pinned to Node 20.x for Render compatibility. package-lock.json removed to avoid bad registry URLs in prior lockfiles.
+
 Release: 3.0.2
 
 Release 3.0.1
