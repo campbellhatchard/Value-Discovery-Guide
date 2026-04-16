@@ -1,0 +1,17 @@
+{
+  "name": "value-discovery-guide-ai-assisted",
+  "version": "3.0.5",
+  "description": "AI-assisted value discovery guide with website deep-dive intelligence, linked entity review, and structured entity evidence",
+  "main": "server.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": "20.x"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2"
+  }
+}
